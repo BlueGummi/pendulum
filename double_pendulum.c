@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 #define WINDOW_WIDTH 1710
-#define WINDOW_HEIGHT 1000
+#define WINDOW_HEIGHT 1107
 #define FPS 60
 #define DT (1.0 / FPS)
 #define GRAVITY 981.0
@@ -425,6 +425,7 @@ void draw_pendulum(AppState *app, SDL_Renderer *renderer, DoublePendulum *p) {
 
 void handle_events(AppState *state, DoublePendulum *p) {
   SDL_Event event;
+  SDL_KeyboardEvent *key;
   while (SDL_PollEvent(&event)) {
     switch (event.type) {
     case SDL_MOUSEBUTTONDOWN:
@@ -457,6 +458,16 @@ void handle_events(AppState *state, DoublePendulum *p) {
 
     case SDL_QUIT:
       state->running = 0;
+      break;
+
+    case SDL_KEYDOWN:
+      key = &event.key;
+      static int fullscreen = 0;
+      if (key->keysym.sym == SDLK_f) {
+        fullscreen = ~(fullscreen) & 1;
+        SDL_SetWindowFullscreen(state->window,
+                                fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
+      }
       break;
 
     case SDL_MOUSEBUTTONUP:

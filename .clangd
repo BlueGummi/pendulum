@@ -1,0 +1,10 @@
+CompileFlags:
+  Add:
+    - -I/opt/homebrew/Cellar/sdl2/2.32.10/include
+    - -I/opt/homebrew/include
+    - -L/opt/homebrew/Cellar/sdl2/2.32.10/lib
+    - -L/opt/homebrew/Cellar/sdl2_ttf/2.24.0/lib
+    - -lSDL2
+    - -lSDL2_ttf
+    - -O3
+
