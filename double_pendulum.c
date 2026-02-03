@@ -39,6 +39,19 @@
 
 #define NO_UNIT NULL
 
+#define TEXTBOX_MAX 32
+
+typedef struct {
+  char text[TEXTBOX_MAX];
+  int cursor;
+  int x, y, w, h;
+  int focused;
+
+  double *target;
+} TextBox;
+
+typedef enum { ANGLE_RAD, ANGLE_DEG } AngleUnit;
+
 typedef struct {
   double x[TRAIL_LENGTH];
   double y[TRAIL_LENGTH];
@@ -83,6 +96,17 @@ typedef struct {
 
   Slider *sliders;
   int slider_count;
+  AngleUnit angle_unit;
+  TextBox angle1_box;
+  TextBox angle2_box;
+  union {
+    struct {
+      double start_angle1;
+      double start_angle2;
+    };
+    double start_angles[2];
+  };
+
 } AppState;
 
 typedef struct {
@@ -140,18 +164,60 @@ static inline int slider_y(const Slider *s, int window_h) {
   return window_h - SLIDER_BASE_Y - s->row * SLIDER_ROW_HEIGHT;
 }
 
+void textbox_mouse_down(TextBox *tb, int mx, int my) {
+  SDL_Rect r = {tb->x, tb->y, tb->w, tb->h};
+  tb->focused = SDL_PointInRect(&(SDL_Point){mx, my}, &r);
+}
+
 void draw_text(SDL_Renderer *r, TTF_Font *font, int x, int y,
                const char *text) {
+  if (!text || text[0] == '\0')
+    return;
+
   SDL_Color color = {255, 255, 255, 255};
 
   SDL_Surface *surf = TTF_RenderText_Blended(font, text, color);
+  if (!surf)
+    return;
+
   SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
+  if (!tex) {
+    SDL_FreeSurface(surf);
+    return;
+  }
 
   SDL_Rect dst = {x, y, surf->w, surf->h};
   SDL_RenderCopy(r, tex, NULL, &dst);
 
   SDL_FreeSurface(surf);
   SDL_DestroyTexture(tex);
+}
+
+void draw_textbox(SDL_Renderer *r, TTF_Font *font, TextBox *tb) {
+  SDL_SetRenderDrawColor(r, tb->focused ? 180 : 120, tb->focused ? 180 : 120,
+                         tb->focused ? 180 : 120, 255);
+
+  SDL_Rect rect = {tb->x, tb->y, tb->w, tb->h};
+  SDL_RenderFillRect(r, &rect);
+
+  SDL_SetRenderDrawColor(r, 40, 40, 40, 255);
+  SDL_RenderDrawRect(r, &rect);
+
+  draw_text(r, font, tb->x + 6, tb->y + 6, tb->text);
+
+  if (tb->focused) {
+    int text_w = 0, text_h = 0;
+    TTF_SizeText(font, tb->text, &text_w, &text_h);
+
+    int cx = tb->x + 6 + text_w + 1;
+    int cy1 = tb->y + 6;
+    int cy2 = tb->y + tb->h - 6;
+
+    if ((SDL_GetTicks() / 500) % 2 == 0) {
+      SDL_SetRenderDrawColor(r, 0, 0, 0, 255);
+      SDL_RenderDrawLine(r, cx, cy1, cx, cy2);
+    }
+  }
 }
 
 void draw_slider(AppState *app, SDL_Renderer *r, TTF_Font *font,
@@ -250,6 +316,29 @@ void init_sliders(AppState *app, DoublePendulum *p) {
   app->slider_count = sizeof(sliders) / sizeof(sliders[0]);
 }
 
+void init_textboxes(AppState *app, DoublePendulum *p) {
+  app->angle1_box = (TextBox){
+      .x = 150,
+      .y = 20,
+      .w = 120,
+      .h = 28,
+      .focused = 0,
+      .target = &app->start_angle1,
+  };
+
+  app->angle2_box = (TextBox){
+      .x = 300,
+      .y = 20,
+      .w = 120,
+      .h = 28,
+      .focused = 0,
+      .target = &app->start_angle2,
+  };
+
+  snprintf(app->angle1_box.text, TEXTBOX_MAX, "%.2f", p->angle1);
+  snprintf(app->angle2_box.text, TEXTBOX_MAX, "%.2f", p->angle2);
+}
+
 AppState *init_app() {
   AppState *state = malloc(sizeof(AppState));
 
@@ -272,6 +361,7 @@ AppState *init_app() {
   state->saved_time_scale = NAN;
   init_trail(&state->trail1);
   init_trail(&state->trail2);
+  state->angle_unit = ANGLE_RAD;
 
   state->ww = START_WINDOW_WIDTH;
   state->wh = START_WINDOW_HEIGHT;
@@ -296,6 +386,7 @@ AppState *init_app() {
   }
 
   SDL_SetRenderDrawBlendMode(state->renderer, SDL_BLENDMODE_BLEND);
+  SDL_StartTextInput();
 
   state->running = 1;
   return state;
@@ -325,6 +416,8 @@ void cleanup_app(AppState *state) {
     TTF_CloseFont(state->font);
     TTF_Quit();
   }
+
+  SDL_StopTextInput();
 
   SDL_Quit();
   free(state);
@@ -422,9 +515,9 @@ void update_pendulum(DoublePendulum *p, double scale) {
       h / 6.0 * (k1.domega2 + 2 * k2.domega2 + 2 * k3.domega2 + k4.domega2);
 }
 
-void reset_pendulum(DoublePendulum *p) {
-  p->angle1 = M_PI;
-  p->angle2 = M_PI / 2;
+void reset_pendulum(DoublePendulum *p, double angle1, double angle2) {
+  p->angle1 = angle1;
+  p->angle2 = angle2;
   p->omega1 = 0.0;
   p->omega2 = 0.0;
 }
@@ -550,7 +643,24 @@ void draw_pendulum(AppState *app, SDL_Renderer *renderer, DoublePendulum *p) {
     draw_slider(app, renderer, app->font, &app->sliders[i]);
   }
 
+  draw_textbox(renderer, app->font, &app->angle1_box);
+  draw_textbox(renderer, app->font, &app->angle2_box);
+  draw_text(renderer, app->font, 450, 24,
+            app->angle_unit == ANGLE_RAD ? "rad" : "deg");
+
   SDL_RenderPresent(renderer);
+}
+
+void textbox_commit(TextBox *tb, AppState *state) {
+  if (!tb || tb->text[0] == '\0')
+    return;
+
+  double v = atof(tb->text);
+
+  if (state->angle_unit == ANGLE_DEG)
+    v = v * M_PI / 180.0;
+
+  *tb->target = v;
 }
 
 void handle_events(AppState *state, DoublePendulum *p) {
@@ -563,12 +673,27 @@ void handle_events(AppState *state, DoublePendulum *p) {
         int mx = event.button.x;
         int my = event.button.y;
 
+        int prev_focused1 = state->angle1_box.focused;
+        int prev_focused2 = state->angle2_box.focused;
+
+        state->angle1_box.focused = 0;
+        state->angle2_box.focused = 0;
+
+        textbox_mouse_down(&state->angle1_box, mx, my);
+        textbox_mouse_down(&state->angle2_box, mx, my);
+
+        if (prev_focused1 && !state->angle1_box.focused)
+          textbox_commit(&state->angle1_box, state);
+
+        if (prev_focused2 && !state->angle2_box.focused)
+          textbox_commit(&state->angle2_box, state);
+
         slider_mouse_down(state, state->sliders, state->slider_count,
                           event.button.x, event.button.y);
 
         SDL_Rect reset_btn = {20, state->wh - RESET_H - 20, RESET_W, RESET_H};
         if (SDL_PointInRect(&(SDL_Point){mx, my}, &reset_btn)) {
-          reset_pendulum(p);
+          reset_pendulum(p, state->start_angle1, state->start_angle2);
           init_trail(&state->trail1);
           init_trail(&state->trail2);
         }
@@ -583,8 +708,7 @@ void handle_events(AppState *state, DoublePendulum *p) {
       key = &event.key;
       static int fullscreen = 0;
 
-      switch (key->keysym.sym) {
-      case SDLK_f:
+      if (key->keysym.sym == SDLK_f) {
         fullscreen = !fullscreen;
         if (fullscreen) {
           SDL_SetWindowSize(state->window, WINDOW_FULL_WIDTH,
@@ -600,8 +724,9 @@ void handle_events(AppState *state, DoublePendulum *p) {
 
         SDL_SetWindowFullscreen(state->window,
                                 fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
-        break;
-      case SDLK_SPACE:
+      }
+
+      if (key->keysym.sym == SDLK_SPACE) {
         if (isnan(state->saved_time_scale)) {
           state->saved_time_scale = state->time_scale;
           state->time_scale = 0.0;
@@ -609,13 +734,54 @@ void handle_events(AppState *state, DoublePendulum *p) {
           state->time_scale = state->saved_time_scale;
           state->saved_time_scale = NAN;
         }
-        break;
-      case SDLK_r:
+      }
+
+      if (key->keysym.sym == SDLK_r) {
         p->mass1 = 1.0;
         p->mass2 = 1.0;
         p->length1 = 150.0;
         p->length2 = 150.0;
-        break;
+      }
+
+      if (key->keysym.sym == SDLK_BACKSPACE) {
+        TextBox *tb = NULL;
+        if (state->angle1_box.focused)
+          tb = &state->angle1_box;
+        if (state->angle2_box.focused)
+          tb = &state->angle2_box;
+
+        if (tb) {
+          size_t len = strlen(tb->text);
+          if (len > 0)
+            tb->text[len - 1] = '\0';
+        }
+      }
+
+      if (key->keysym.sym == SDLK_RETURN) {
+        if (state->angle1_box.focused) {
+          textbox_commit(&state->angle1_box, state);
+          state->angle1_box.focused = 0;
+        }
+        if (state->angle2_box.focused) {
+          textbox_commit(&state->angle2_box, state);
+          state->angle2_box.focused = 0;
+        }
+      }
+
+      if (key->keysym.sym == SDLK_d) {
+        state->angle_unit =
+            (state->angle_unit == ANGLE_RAD) ? ANGLE_DEG : ANGLE_RAD;
+
+        TextBox *boxes[] = {&state->angle1_box, &state->angle2_box};
+
+        for (int i = 0; i < 2; i++) {
+          double v = state->start_angles[i];
+
+          if (state->angle_unit == ANGLE_DEG)
+            v = v * 180.0 / M_PI;
+
+          snprintf(boxes[i]->text, TEXTBOX_MAX, "%.2f", v);
+        }
       }
 
       break;
@@ -631,6 +797,16 @@ void handle_events(AppState *state, DoublePendulum *p) {
       }
 
       break;
+
+    case SDL_TEXTINPUT:
+      if (state->angle1_box.focused) {
+        strncat(state->angle1_box.text, event.text.text,
+                TEXTBOX_MAX - strlen(state->angle1_box.text) - 1);
+      } else if (state->angle2_box.focused) {
+        strncat(state->angle2_box.text, event.text.text,
+                TEXTBOX_MAX - strlen(state->angle2_box.text) - 1);
+      }
+      break;
     }
   }
 }
@@ -641,7 +817,11 @@ int main(int argc, char *argv[]) {
     return 1;
 
   DoublePendulum *pendulum = init_pendulum();
+  app->start_angle1 = pendulum->angle1;
+  app->start_angle2 = pendulum->angle2;
+
   init_sliders(app, pendulum);
+  init_textboxes(app, pendulum);
 
   Uint32 frame_start, frame_time;
 
