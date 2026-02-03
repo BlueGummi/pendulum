@@ -3,8 +3,11 @@
 #include <math.h>
 #include <stdio.h>
 
-#define WINDOW_WIDTH 1710
-#define WINDOW_HEIGHT 1107
+#define WINDOW_FULL_WIDTH 1710
+#define WINDOW_FULL_HEIGHT 1107
+
+#define START_WINDOW_WIDTH 1400
+#define START_WINDOW_HEIGHT 900
 #define FPS 60
 #define DT (1.0 / FPS)
 #define GRAVITY 981.0
@@ -12,32 +15,41 @@
 #define RESET_H 40
 #define TRAIL_LENGTH 2000
 #define SLIDER_X 150
-#define SLIDER_Y (WINDOW_HEIGHT - 50)
+#define SLIDER_Y(wh) (wh - 50)
 #define SLIDER_W 300
 #define SLIDER_H 6
 #define LEN1_SLIDER_X 500
-#define LEN1_SLIDER_Y (WINDOW_HEIGHT - 50)
+#define LEN1_SLIDER_Y(wh) (wh - 50)
 #define LEN_SLIDER_W 300
 #define LEN_SLIDER_H 6
 
 #define LEN2_SLIDER_X 900
-#define LEN2_SLIDER_Y (WINDOW_HEIGHT - 50)
+#define LEN2_SLIDER_Y(wh) (wh - 50)
 
 #define MIN_LEN 50.0
 #define MAX_LEN 300.0
 
-typedef enum {
-  SLIDER_NONE,
-  SLIDER_TIME,
-  SLIDER_LEN1,
-  SLIDER_LEN2
-} ActiveSlider;
+#define SLIDER_ROW_HEIGHT 60
+#define SLIDER_BASE_Y 50
+
+#define MASS_REF 1.0
+#define MASS_SIZE_REF 16.0
 
 typedef struct {
-  SDL_Point points[TRAIL_LENGTH];
+  double x[TRAIL_LENGTH];
+  double y[TRAIL_LENGTH];
   int head;
   int count;
 } Trail;
+
+typedef struct {
+  const char *label;
+  int x;
+  int row;
+  int w, h;
+  double min, max;
+  double *value;
+} Slider;
 
 typedef struct {
   double angle1;
@@ -58,6 +70,10 @@ typedef struct {
   double time_scale;
   Trail trail1;
   Trail trail2;
+  int ww, wh;
+
+  Slider *sliders;
+  int slider_count;
 } AppState;
 
 typedef struct {
@@ -69,7 +85,69 @@ typedef struct {
   double vx, vy;
 } Vec2;
 
-static ActiveSlider active_slider = SLIDER_NONE;
+static Slider *active_slider = NULL;
+
+static double slider_value_from_mouse(const Slider *s, int mx) {
+  double t = (double)(mx - s->x) / s->w;
+  if (t < 0.0)
+    t = 0.0;
+  if (t > 1.0)
+    t = 1.0;
+  return s->min + t * (s->max - s->min);
+}
+
+static double slider_t_from_value(const Slider *s) {
+  return (*s->value - s->min) / (s->max - s->min);
+}
+
+static inline int slider_y(const Slider *s, int window_h) {
+  return window_h - SLIDER_BASE_Y - s->row * SLIDER_ROW_HEIGHT;
+}
+
+void draw_text(SDL_Renderer *r, TTF_Font *font, int x, int y,
+               const char *text) {
+  SDL_Color color = {255, 255, 255, 255};
+
+  SDL_Surface *surf = TTF_RenderText_Blended(font, text, color);
+  SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
+
+  SDL_Rect dst = {x, y, surf->w, surf->h};
+  SDL_RenderCopy(r, tex, NULL, &dst);
+
+  SDL_FreeSurface(surf);
+  SDL_DestroyTexture(tex);
+}
+
+void draw_slider(AppState *app, SDL_Renderer *r, TTF_Font *font,
+                 const Slider *s) {
+  SDL_Rect track = {s->x, slider_y(s, app->wh), s->w, s->h};
+  SDL_SetRenderDrawColor(r, 120, 120, 120, 255);
+  SDL_RenderFillRect(r, &track);
+
+  double t = slider_t_from_value(s);
+  int knob_x = s->x + (int)(t * s->w);
+
+  SDL_Rect knob = {knob_x - 6, slider_y(s, app->wh) - 6, 12, s->h + 12};
+  SDL_SetRenderDrawColor(r, 220, 220, 220, 255);
+  SDL_RenderFillRect(r, &knob);
+
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%s: %.2f", s->label, *s->value);
+  draw_text(r, font, s->x, slider_y(s, app->wh) - 20, buf);
+}
+
+void slider_mouse_down(AppState *app, Slider *sliders, int count, int mx,
+                       int my) {
+  for (int i = 0; i < count; i++) {
+    SDL_Rect hit = {sliders[i].x, slider_y(&sliders[i], app->wh) - 10,
+                    sliders[i].w, sliders[i].h + 20};
+
+    if (SDL_PointInRect(&(SDL_Point){mx, my}, &hit)) {
+      active_slider = &sliders[i];
+      return;
+    }
+  }
+}
 
 double slider_to_value(double t, double min, double max) {
   return min + t * (max - min);
@@ -116,6 +194,25 @@ void init_trail(Trail *t) {
   t->count = 0;
 }
 
+void init_sliders(AppState *app, DoublePendulum *p) {
+  static Slider sliders[] = {
+      {"Speed", 150, 0, 300, 6, 0.1, 4.0, NULL},
+      {"Length 1", 500, 0, 300, 6, MIN_LEN, MAX_LEN, NULL},
+      {"Length 2", 900, 0, 300, 6, MIN_LEN, MAX_LEN, NULL},
+      {"Mass 1", 500, 1, 300, 6, 0.1, 10.0, NULL},
+      {"Mass 2", 900, 1, 300, 6, 0.1, 10.0, NULL},
+  };
+
+  sliders[0].value = &app->time_scale;
+  sliders[1].value = &p->length1;
+  sliders[2].value = &p->length2;
+  sliders[3].value = &p->mass1;
+  sliders[4].value = &p->mass2;
+
+  app->sliders = sliders;
+  app->slider_count = sizeof(sliders) / sizeof(sliders[0]);
+}
+
 AppState *init_app() {
   AppState *state = malloc(sizeof(AppState));
 
@@ -138,9 +235,11 @@ AppState *init_app() {
   init_trail(&state->trail1);
   init_trail(&state->trail2);
 
+  state->ww = START_WINDOW_WIDTH;
+  state->wh = START_WINDOW_HEIGHT;
   state->window = SDL_CreateWindow(
       "wahoo wee I'm crazy weehoo", SDL_WINDOWPOS_CENTERED,
-      SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_SHOWN);
+      SDL_WINDOWPOS_CENTERED, state->ww, state->wh, SDL_WINDOW_SHOWN);
 
   if (!state->window) {
     oops();
@@ -164,8 +263,9 @@ AppState *init_app() {
   return state;
 }
 
-void trail_push(Trail *t, int x, int y) {
-  t->points[t->head] = (SDL_Point){x, y};
+void trail_push(Trail *t, double x, double y) {
+  t->x[t->head] = x;
+  t->y[t->head] = y;
   t->head = (t->head + 1) % TRAIL_LENGTH;
   if (t->count < TRAIL_LENGTH)
     t->count++;
@@ -185,20 +285,6 @@ void cleanup_app(AppState *state) {
 
   SDL_Quit();
   free(state);
-}
-
-void draw_text(SDL_Renderer *r, TTF_Font *font, int x, int y,
-               const char *text) {
-  SDL_Color color = {255, 255, 255, 255};
-
-  SDL_Surface *surf = TTF_RenderText_Blended(font, text, color);
-  SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
-
-  SDL_Rect dst = {x, y, surf->w, surf->h};
-  SDL_RenderCopy(r, tex, NULL, &dst);
-
-  SDL_FreeSurface(surf);
-  SDL_DestroyTexture(tex);
 }
 
 DoublePendulum *init_pendulum() {
@@ -300,7 +386,7 @@ void reset_pendulum(DoublePendulum *p) {
   p->omega2 = 0.0;
 }
 
-void draw_trail(SDL_Renderer *r, Trail *t, SDL_Color base) {
+void draw_trail(SDL_Renderer *r, Trail *t, SDL_Color base, int cx, int cy) {
   if (t->count < 2)
     return;
 
@@ -311,22 +397,40 @@ void draw_trail(SDL_Renderer *r, Trail *t, SDL_Color base) {
     float alpha = (float)i / (float)t->count;
     SDL_SetRenderDrawColor(r, base.r, base.g, base.b, (Uint8)(alpha * 180));
 
-    SDL_RenderDrawLine(r, t->points[idx1].x, t->points[idx1].y,
-                       t->points[idx2].x, t->points[idx2].y);
+    SDL_RenderDrawLine(r, cx + (int)t->x[idx1], cy + (int)t->y[idx1],
+                       cx + (int)t->x[idx2], cy + (int)t->y[idx2]);
   }
 }
 
+static inline int mass_to_size(double mass) {
+  double s = MASS_SIZE_REF * sqrt(mass / MASS_REF);
+
+  if (s < 6)
+    s = 6;
+  if (s > 40)
+    s = 40;
+
+  return (int)s;
+}
+
 void draw_pendulum(AppState *app, SDL_Renderer *renderer, DoublePendulum *p) {
-  int center_x = WINDOW_WIDTH / 2;
-  int center_y = WINDOW_HEIGHT / 2;
+  int center_x = app->ww / 2;
+  int center_y = app->wh / 2;
 
   int x1 = center_x + (int)(p->length1 * sin(p->angle1));
   int y1 = center_y + (int)(p->length1 * cos(p->angle1));
 
   int x2 = x1 + (int)(p->length2 * sin(p->angle2));
   int y2 = y1 + (int)(p->length2 * cos(p->angle2));
-  trail_push(&app->trail1, x1, y1);
-  trail_push(&app->trail2, x2, y2);
+
+  double rx1 = p->length1 * sin(p->angle1);
+  double ry1 = p->length1 * cos(p->angle1);
+
+  double rx2 = rx1 + p->length2 * sin(p->angle2);
+  double ry2 = ry1 + p->length2 * cos(p->angle2);
+
+  trail_push(&app->trail1, rx1, ry1);
+  trail_push(&app->trail2, rx2, ry2);
 
   Vec2 v1 = velocity_mass1(p);
   Vec2 v2 = velocity_mass2(p);
@@ -337,8 +441,10 @@ void draw_pendulum(AppState *app, SDL_Renderer *renderer, DoublePendulum *p) {
   SDL_SetRenderDrawColor(renderer, 20, 20, 40, 255);
   SDL_RenderClear(renderer);
 
-  draw_trail(renderer, &app->trail1, (SDL_Color){80, 160, 255, 255});
-  draw_trail(renderer, &app->trail2, (SDL_Color){255, 100, 200, 255});
+  draw_trail(renderer, &app->trail1, (SDL_Color){80, 160, 255, 255}, center_x,
+             center_y);
+  draw_trail(renderer, &app->trail2, (SDL_Color){255, 100, 200, 255}, center_x,
+             center_y);
 
   char buf[64];
 
@@ -364,61 +470,30 @@ void draw_pendulum(AppState *app, SDL_Renderer *renderer, DoublePendulum *p) {
   SDL_Rect pivot_rect = {center_x - 5, center_y - 5, 10, 10};
   SDL_RenderFillRect(renderer, &pivot_rect);
 
+  int size1 = mass_to_size(p->mass1);
+  int size2 = mass_to_size(p->mass2);
+
+  SDL_Rect mass1_rect = {x1 - size1 / 2, y1 - size1 / 2, size1, size1};
+
+  SDL_Rect mass2_rect = {x2 - size2 / 2, y2 - size2 / 2, size2, size2};
+
   SDL_SetRenderDrawColor(renderer, 50, 200, 100, 255);
-  SDL_Rect mass1_rect = {x1 - 8, y1 - 8, 16, 16};
   SDL_RenderFillRect(renderer, &mass1_rect);
 
   SDL_SetRenderDrawColor(renderer, 100, 255, 150, 255);
-  SDL_Rect mass2_rect = {x2 - 8, y2 - 8, 16, 16};
   SDL_RenderFillRect(renderer, &mass2_rect);
 
-  SDL_Rect reset_btn = {20, WINDOW_HEIGHT - RESET_H - 20, RESET_W, RESET_H};
+  SDL_Rect reset_btn = {20, app->wh - RESET_H - 20, RESET_W, RESET_H};
 
   SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
   SDL_RenderFillRect(renderer, &reset_btn);
 
   SDL_SetRenderDrawColor(renderer, 200, 200, 200, 255);
   SDL_RenderDrawRect(renderer, &reset_btn);
-  SDL_Rect track = {SLIDER_X, SLIDER_Y, SLIDER_W, SLIDER_H};
-  SDL_SetRenderDrawColor(renderer, 120, 120, 120, 255);
-  SDL_RenderFillRect(renderer, &track);
 
-  int knob_x = SLIDER_X + (int)(app->time_scale / 4.0 * SLIDER_W);
-  SDL_Rect knob = {knob_x - 6, SLIDER_Y - 6, 12, 18};
-
-  SDL_Rect track1 = {LEN1_SLIDER_X, LEN1_SLIDER_Y, LEN_SLIDER_W, LEN_SLIDER_H};
-  SDL_SetRenderDrawColor(renderer, 120, 120, 120, 255);
-  SDL_RenderFillRect(renderer, &track1);
-
-  double t1 = value_to_slider(p->length1, MIN_LEN, MAX_LEN);
-  int knob1_x = LEN1_SLIDER_X + (int)(t1 * LEN_SLIDER_W);
-  SDL_Rect knob1 = {knob1_x - 6, LEN1_SLIDER_Y - 6, 12, 18};
-  SDL_SetRenderDrawColor(renderer, 220, 220, 220, 255);
-  SDL_RenderFillRect(renderer, &knob1);
-
-  char buf2[64];
-  snprintf(buf2, sizeof(buf2), "Length 1: %.0f", p->length1);
-  draw_text(renderer, app->font, LEN1_SLIDER_X, LEN1_SLIDER_Y - 20, buf2);
-
-  SDL_Rect track2 = {LEN2_SLIDER_X, LEN2_SLIDER_Y, LEN_SLIDER_W, LEN_SLIDER_H};
-  SDL_SetRenderDrawColor(renderer, 120, 120, 120, 255);
-  SDL_RenderFillRect(renderer, &track2);
-
-  double t2 = value_to_slider(p->length2, MIN_LEN, MAX_LEN);
-  int knob2_x = LEN2_SLIDER_X + (int)(t2 * LEN_SLIDER_W);
-  SDL_Rect knob2 = {knob2_x - 6, LEN2_SLIDER_Y - 6, 12, 18};
-  SDL_SetRenderDrawColor(renderer, 220, 220, 220, 255);
-  SDL_RenderFillRect(renderer, &knob2);
-
-  snprintf(buf2, sizeof(buf2), "Length 2: %.0f", p->length2);
-  draw_text(renderer, app->font, LEN2_SLIDER_X, LEN2_SLIDER_Y - 20, buf2);
-
-  SDL_SetRenderDrawColor(renderer, 220, 220, 220, 255);
-  SDL_RenderFillRect(renderer, &knob);
-
-  char buf1[64];
-  snprintf(buf1, sizeof(buf1), "Speed: %.2fx", app->time_scale);
-  draw_text(renderer, app->font, SLIDER_X, SLIDER_Y - 20, buf1);
+  for (int i = 0; i < app->slider_count; i++) {
+    draw_slider(app, renderer, app->font, &app->sliders[i]);
+  }
 
   SDL_RenderPresent(renderer);
 }
@@ -433,21 +508,10 @@ void handle_events(AppState *state, DoublePendulum *p) {
         int mx = event.button.x;
         int my = event.button.y;
 
-        SDL_Rect time_slider = {SLIDER_X, SLIDER_Y - 10, SLIDER_W, 30};
-        SDL_Rect len1_slider = {LEN1_SLIDER_X, LEN1_SLIDER_Y - 10, LEN_SLIDER_W,
-                                30};
-        SDL_Rect len2_slider = {LEN2_SLIDER_X, LEN2_SLIDER_Y - 10, LEN_SLIDER_W,
-                                30};
+        slider_mouse_down(state, state->sliders, state->slider_count,
+                          event.button.x, event.button.y);
 
-        if (SDL_PointInRect(&(SDL_Point){mx, my}, &time_slider))
-          active_slider = SLIDER_TIME;
-        else if (SDL_PointInRect(&(SDL_Point){mx, my}, &len1_slider))
-          active_slider = SLIDER_LEN1;
-        else if (SDL_PointInRect(&(SDL_Point){mx, my}, &len2_slider))
-          active_slider = SLIDER_LEN2;
-
-        SDL_Rect reset_btn = {20, WINDOW_HEIGHT - RESET_H - 20, RESET_W,
-                              RESET_H};
+        SDL_Rect reset_btn = {20, state->wh - RESET_H - 20, RESET_W, RESET_H};
         if (SDL_PointInRect(&(SDL_Point){mx, my}, &reset_btn)) {
           reset_pendulum(p);
           init_trail(&state->trail1);
@@ -464,43 +528,33 @@ void handle_events(AppState *state, DoublePendulum *p) {
       key = &event.key;
       static int fullscreen = 0;
       if (key->keysym.sym == SDLK_f) {
-        fullscreen = ~(fullscreen) & 1;
+        fullscreen = !fullscreen;
+        if (fullscreen) {
+          SDL_SetWindowSize(state->window, WINDOW_FULL_WIDTH,
+                            WINDOW_FULL_HEIGHT);
+          state->ww = WINDOW_FULL_WIDTH;
+          state->wh = WINDOW_FULL_HEIGHT;
+        } else {
+          SDL_SetWindowSize(state->window, START_WINDOW_WIDTH,
+                            START_WINDOW_HEIGHT);
+          state->ww = START_WINDOW_WIDTH;
+          state->wh = START_WINDOW_HEIGHT;
+        }
+
         SDL_SetWindowFullscreen(state->window,
                                 fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
       }
+
       break;
 
     case SDL_MOUSEBUTTONUP:
-      active_slider = SLIDER_NONE;
+      active_slider = NULL;
       break;
 
     case SDL_MOUSEMOTION:
-      if (active_slider != SLIDER_NONE) {
-        int mx = event.motion.x;
-
-        double t;
-        switch (active_slider) {
-        case SLIDER_TIME:
-          t = (double)(mx - SLIDER_X) / SLIDER_W;
-          t = fmin(fmax(t, 0.0), 1.0);
-          state->time_scale = 0.1 + t * 4.0;
-          break;
-
-        case SLIDER_LEN1:
-          t = (double)(mx - LEN1_SLIDER_X) / LEN_SLIDER_W;
-          t = fmin(fmax(t, 0.0), 1.0);
-          p->length1 = slider_to_value(t, MIN_LEN, MAX_LEN);
-          break;
-
-        case SLIDER_LEN2:
-          t = (double)(mx - LEN2_SLIDER_X) / LEN_SLIDER_W;
-          t = fmin(fmax(t, 0.0), 1.0);
-          p->length2 = slider_to_value(t, MIN_LEN, MAX_LEN);
-          break;
-
-        default:
-          break;
-        }
+      if (active_slider) {
+        *active_slider->value =
+            slider_value_from_mouse(active_slider, event.motion.x);
       }
 
       break;
@@ -514,6 +568,7 @@ int main(int argc, char *argv[]) {
     return 1;
 
   DoublePendulum *pendulum = init_pendulum();
+  init_sliders(app, pendulum);
 
   Uint32 frame_start, frame_time;
 
