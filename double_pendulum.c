@@ -3,6 +3,8 @@
 #include <math.h>
 #include <stdio.h>
 
+/* ALL UNITS IN HERE ARE CENTIMETERS AND ALL MASSES ARE KILOGRAMS */
+
 #define WINDOW_FULL_WIDTH 1710
 #define WINDOW_FULL_HEIGHT 1107
 
@@ -35,15 +37,21 @@
 #define MASS_REF 1.0
 #define MASS_SIZE_REF 16.0
 
+#define NO_UNIT NULL
+
 typedef struct {
   double x[TRAIL_LENGTH];
   double y[TRAIL_LENGTH];
+
+  double mass[TRAIL_LENGTH];
+  double speed[TRAIL_LENGTH];
+
   int head;
   int count;
 } Trail;
 
 typedef struct {
-  const char *label;
+  const char *label, *unit;
   int x;
   int row;
   int w, h;
@@ -68,6 +76,7 @@ typedef struct {
   TTF_Font *font;
   int running;
   double time_scale;
+  double saved_time_scale;
   Trail trail1;
   Trail trail2;
   int ww, wh;
@@ -86,6 +95,33 @@ typedef struct {
 } Vec2;
 
 static Slider *active_slider = NULL;
+
+static inline int mass_to_thickness(double mass) {
+  double t = 1.5 * sqrt(mass);
+  if (t < 1)
+    t = 1;
+  if (t > 8)
+    t = 8;
+  return (int)t;
+}
+
+static inline Uint8 lerp_u8(Uint8 a, Uint8 b, double t) {
+  return (Uint8)(a + t * (b - a));
+}
+
+SDL_Color mass_to_color(double mass, double min_m, double max_m) {
+  double t = (mass - min_m) / (max_m - min_m);
+  if (t < 0)
+    t = 0;
+  if (t > 1)
+    t = 1;
+
+  SDL_Color bright = {120, 255, 150, 255};
+  SDL_Color dark = {20, 120, 60, 255};
+
+  return (SDL_Color){lerp_u8(bright.r, dark.r, t), lerp_u8(bright.g, dark.g, t),
+                     lerp_u8(bright.b, dark.b, t), 255};
+}
 
 static double slider_value_from_mouse(const Slider *s, int mx) {
   double t = (double)(mx - s->x) / s->w;
@@ -132,7 +168,8 @@ void draw_slider(AppState *app, SDL_Renderer *r, TTF_Font *font,
   SDL_RenderFillRect(r, &knob);
 
   char buf[64];
-  snprintf(buf, sizeof(buf), "%s: %.2f", s->label, *s->value);
+  snprintf(buf, sizeof(buf), "%s: %.2f %s", s->label, *s->value,
+           s->unit ? s->unit : "(no unit)");
   draw_text(r, font, s->x, slider_y(s, app->wh) - 20, buf);
 }
 
@@ -196,11 +233,11 @@ void init_trail(Trail *t) {
 
 void init_sliders(AppState *app, DoublePendulum *p) {
   static Slider sliders[] = {
-      {"Speed", 150, 0, 300, 6, 0.1, 4.0, NULL},
-      {"Length 1", 500, 0, 300, 6, MIN_LEN, MAX_LEN, NULL},
-      {"Length 2", 900, 0, 300, 6, MIN_LEN, MAX_LEN, NULL},
-      {"Mass 1", 500, 1, 300, 6, 0.1, 10.0, NULL},
-      {"Mass 2", 900, 1, 300, 6, 0.1, 10.0, NULL},
+      {"Speed", NO_UNIT, 150, 0, 300, 6, 0.0, 10.0, NULL},
+      {"Length 1", "cm", 500, 0, 300, 6, MIN_LEN, MAX_LEN, NULL},
+      {"Length 2", "cm", 900, 0, 300, 6, MIN_LEN, MAX_LEN, NULL},
+      {"Mass 1", "kg", 500, 1, 300, 6, 0.1, 10.0, NULL},
+      {"Mass 2", "kg", 900, 1, 300, 6, 0.1, 10.0, NULL},
   };
 
   sliders[0].value = &app->time_scale;
@@ -232,6 +269,7 @@ AppState *init_app() {
   }
 
   state->time_scale = 1.0;
+  state->saved_time_scale = NAN;
   init_trail(&state->trail1);
   init_trail(&state->trail2);
 
@@ -263,10 +301,15 @@ AppState *init_app() {
   return state;
 }
 
-void trail_push(Trail *t, double x, double y) {
-  t->x[t->head] = x;
-  t->y[t->head] = y;
-  t->head = (t->head + 1) % TRAIL_LENGTH;
+void trail_push(Trail *t, double x, double y, double mass, double speed) {
+  int i = t->head;
+
+  t->x[i] = x;
+  t->y[i] = y;
+  t->mass[i] = mass;
+  t->speed[i] = speed;
+
+  t->head = (i + 1) % TRAIL_LENGTH;
   if (t->count < TRAIL_LENGTH)
     t->count++;
 }
@@ -386,19 +429,33 @@ void reset_pendulum(DoublePendulum *p) {
   p->omega2 = 0.0;
 }
 
-void draw_trail(SDL_Renderer *r, Trail *t, SDL_Color base, int cx, int cy) {
+void draw_trail(SDL_Renderer *r, Trail *t, int cx, int cy, double min_mass,
+                double max_mass) {
   if (t->count < 2)
     return;
 
   for (int i = 0; i < t->count - 1; i++) {
-    int idx1 = (t->head - t->count + i + TRAIL_LENGTH) % TRAIL_LENGTH;
-    int idx2 = (idx1 + 1) % TRAIL_LENGTH;
+    int i1 = (t->head - t->count + i + TRAIL_LENGTH) % TRAIL_LENGTH;
+    int i2 = (i1 + 1) % TRAIL_LENGTH;
 
-    float alpha = (float)i / (float)t->count;
-    SDL_SetRenderDrawColor(r, base.r, base.g, base.b, (Uint8)(alpha * 180));
+    double fade = (double)i / (double)t->count;
 
-    SDL_RenderDrawLine(r, cx + (int)t->x[idx1], cy + (int)t->y[idx1],
-                       cx + (int)t->x[idx2], cy + (int)t->y[idx2]);
+    SDL_Color c = mass_to_color(t->mass[i1], min_mass, max_mass);
+    c.a = (Uint8)(fade * 180);
+
+    SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a);
+
+    int thickness = mass_to_thickness(t->mass[i1]);
+
+    int x1 = cx + (int)t->x[i1];
+    int y1 = cy + (int)t->y[i1];
+    int x2 = cx + (int)t->x[i2];
+    int y2 = cy + (int)t->y[i2];
+
+    for (int k = -thickness / 2; k <= thickness / 2; k++) {
+      SDL_RenderDrawLine(r, x1 + k, y1, x2 + k, y2);
+      SDL_RenderDrawLine(r, x1, y1 + k, x2, y2 + k);
+    }
   }
 }
 
@@ -429,29 +486,27 @@ void draw_pendulum(AppState *app, SDL_Renderer *renderer, DoublePendulum *p) {
   double rx2 = rx1 + p->length2 * sin(p->angle2);
   double ry2 = ry1 + p->length2 * cos(p->angle2);
 
-  trail_push(&app->trail1, rx1, ry1);
-  trail_push(&app->trail2, rx2, ry2);
-
   Vec2 v1 = velocity_mass1(p);
   Vec2 v2 = velocity_mass2(p);
 
   double mag1 = hypot(v1.vx, v1.vy);
   double mag2 = hypot(v2.vx, v2.vy);
 
+  trail_push(&app->trail1, rx1, ry1, p->mass1, mag1);
+  trail_push(&app->trail2, rx2, ry2, p->mass2, mag2);
+
   SDL_SetRenderDrawColor(renderer, 20, 20, 40, 255);
   SDL_RenderClear(renderer);
 
-  draw_trail(renderer, &app->trail1, (SDL_Color){80, 160, 255, 255}, center_x,
-             center_y);
-  draw_trail(renderer, &app->trail2, (SDL_Color){255, 100, 200, 255}, center_x,
-             center_y);
+  draw_trail(renderer, &app->trail1, center_x, center_y, 0.1, 10.0);
+  draw_trail(renderer, &app->trail2, center_x, center_y, 0.1, 10.0);
 
   char buf[64];
 
-  snprintf(buf, sizeof(buf), "|v1| = %.2f", mag1);
+  snprintf(buf, sizeof(buf), "%.2f m/s", mag1 / 100.0);
   draw_text(renderer, app->font, x1 + 10, y1 - 10, buf);
 
-  snprintf(buf, sizeof(buf), "|v2| = %.2f", mag2);
+  snprintf(buf, sizeof(buf), "%.2f m/s", mag2 / 100.0);
   draw_text(renderer, app->font, x2 + 10, y2 - 10, buf);
 
   SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255);
@@ -527,7 +582,9 @@ void handle_events(AppState *state, DoublePendulum *p) {
     case SDL_KEYDOWN:
       key = &event.key;
       static int fullscreen = 0;
-      if (key->keysym.sym == SDLK_f) {
+
+      switch (key->keysym.sym) {
+      case SDLK_f:
         fullscreen = !fullscreen;
         if (fullscreen) {
           SDL_SetWindowSize(state->window, WINDOW_FULL_WIDTH,
@@ -543,6 +600,22 @@ void handle_events(AppState *state, DoublePendulum *p) {
 
         SDL_SetWindowFullscreen(state->window,
                                 fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
+        break;
+      case SDLK_SPACE:
+        if (isnan(state->saved_time_scale)) {
+          state->saved_time_scale = state->time_scale;
+          state->time_scale = 0.0;
+        } else {
+          state->time_scale = state->saved_time_scale;
+          state->saved_time_scale = NAN;
+        }
+        break;
+      case SDLK_r:
+        p->mass1 = 1.0;
+        p->mass2 = 1.0;
+        p->length1 = 150.0;
+        p->length2 = 150.0;
+        break;
       }
 
       break;
